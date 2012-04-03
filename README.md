@@ -22,7 +22,7 @@ For docs and real usage, check out http://sqlkorma.com
 (use 'korma.db)
 (defdb db (mysql {:Host "localhost"
                   :Database "mydb"
-                  :User "user"
+		  :User "user"
 		  :Port "3306"
 		  :Password "dbpass"}))
 
