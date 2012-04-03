@@ -4,12 +4,12 @@ Tasty SQL for ClojureCLR.
 
 ## Getting started
 
-This is a port of Korma to ClojureCLR.  Only MySql is currently supported.
+This is a port of Korma to ClojureCLR.  Only MySql is supported right now.
 In order for MySql to work, MySql.Data.dll (from MySQL Connect/NET) will need
 to be loaded into the current AppDomain (the assembly-load functions can be
 used for this).  The map of options passed to the MySql function is used to
 generate the MySql connection string (see the connection string options
-[here](http://dev.mysql.com/doc/refman/5.6/en/connector-net-connection-options.html)
+[here](http://dev.mysql.com/doc/refman/5.6/en/connector-net-connection-options.html),
 as well as the example below).
 
 For docs and real usage, check out http://sqlkorma.com
