@@ -1,46 +1,30 @@
-# Korma
+# Korma.net
 
-Tasty SQL for Clojure.
+Tasty SQL for ClojureCLR.
 
 ## Getting started
 
-Simply add Korma as a dependency to your lein/cake project:
-
-```clojure
-[korma "0.3.0-beta9"]
-```
+This is a port of Korma to ClojureCLR.  Only MySql is currently supported.
+In order for MySql to work, MySql.Data.dll (from MySQL Connect/NET) will need
+to be loaded into the current AppDomain (the assembly-load functions can be
+used for this).  The map of options passed to the MySql function is used to
+generate the MySql connection string (see the connection string options
+[here](http://dev.mysql.com/doc/refman/5.6/en/connector-net-connection-options.html)
+as well as the example below).
 
 For docs and real usage, check out http://sqlkorma.com
 
-To get rid of the ridiculously verbose logging, add the following into src/log4j.xml:
-
-```xml
-<?xml version="1.0" encoding="UTF-8" ?>
-<!DOCTYPE log4j:configuration SYSTEM "log4j.dtd">
-<log4j:configuration xmlns:log4j="http://jakarta.apache.org/log4j/">
-  <logger name="com.mchange">
-    <level value="WARN"/>
-  </logger>
-</log4j:configuration>
-```
-
-And include log4j in your project.clj:
-
-```clojure
-[log4j "1.2.15" :exclusions [javax.mail/mail
-                            javax.jms/jms
-                            com.sun.jdmk/jmxtools
-                            com.sun.jmx/jmxri]]
-```
 
 ## Examples of generated queries:
 
 ```clojure
 
 (use 'korma.db)
-(defdb db (postgres {:db "mydb"
-                     :user "user"
-                     :password "dbpass"}))
+(defdb db (mysql {:Host "localhost"
+		:Database "mydb"
+                :User "user"
+		:Port "3306"
+                :Password "dbpass"}))
 
 (use 'korma.core)
 (defentity users)
