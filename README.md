@@ -21,10 +21,10 @@ For docs and real usage, check out http://sqlkorma.com
 
 (use 'korma.db)
 (defdb db (mysql {:Host "localhost"
-		:Database "mydb"
-                :User "user"
-		:Port "3306"
-                :Password "dbpass"}))
+                  :Database "mydb"
+                  :User "user"
+		  :Port "3306"
+		  :Password "dbpass"}))
 
 (use 'korma.core)
 (defentity users)
