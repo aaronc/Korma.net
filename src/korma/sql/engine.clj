@@ -13,6 +13,7 @@
 (def ^{:dynamic true} *bound-aliases* #{})
 (def ^{:dynamic true} *bound-params* nil)
 (def ^{:dynamic true} *bound-options* nil)
+(def ^{:dynamic true} *bound-param-index* nil)
 
 ;;*****************************************************
 ;; delimiters
@@ -76,7 +77,7 @@
     ;;check if it's already prefixed
     (if (and (keyword? field)
              (not (*bound-aliases* field))
-             (= -1 (.indexOf field-name ".")))
+             (= -1 (.IndexOf field-name ".")))
       (let [table (if (string? ent)
                     ent
                     (table-alias ent))]
@@ -119,7 +120,10 @@
 (defn parameterize [v]
   (when *bound-params*
     (swap! *bound-params* conj v))
-  "?")
+  (if *bound-param-index*
+    (str "@p" (swap! *bound-param-index* inc))
+    "?"))
+  
 
 (defn str-value [v]
   (cond
@@ -147,7 +151,8 @@
      ~@body))
 
 (defmacro bind-params [& body]
-  `(binding [*bound-params* (atom [])]
+  `(binding [*bound-params* (atom [])
+             *bound-param-index* (atom -1)]
      (let [query# (do ~@body)
            params# (if (:params query#)
                      (concat (:params query#) @*bound-params*)

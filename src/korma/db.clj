@@ -1,9 +1,12 @@
 (ns korma.db
   "Functions for creating and managing database specifications."
-  (:require [clojure.java.jdbc :as jdbc]
-            [clojure.java.jdbc.internal :as ijdbc]
-            [korma.config :as conf])
-  (:import com.mchange.v2.c3p0.ComboPooledDataSource))
+  
+  (comment (:require [clojure.java.jdbc :as jdbc]
+                     [clojure.java.jdbc.internal :as ijdbc]
+                     [korma.config :as conf])
+           (:import com.mchange.v2.c3p0.ComboPooledDataSource))
+  (:require [korma.config :as conf])
+  (:import [System.Data IDbCommand]))
 
 (defonce _default (atom nil))
 
@@ -11,167 +14,190 @@
   {:keyword keys
    :identifier fields})
 
+(def ^:dynamic *db* nil)
+
+(def ^:dynamic *get-last-insert-id* nil)
+
 (defn default-connection
-  "Set the database connection that Korma should use by default when no 
+    "Set the database connection that Korma should use by default when no 
   alternative is specified."
-  [conn]
-  (conf/merge-defaults (:options conn))
-  (reset! _default conn))
+    [conn]
+    (conf/merge-defaults (:options conn))
+    (reset! _default conn))
 
-(defn connection-pool
-  "Create a connection pool for the given database spec."
-  [spec]
-  (let [excess (or (:excess-timeout spec) (* 30 60))
-        idle (or (:idle-timeout spec) (* 3 60 60))
-        cpds (doto (ComboPooledDataSource.)
-               (.setDriverClass (:classname spec))
-               (.setJdbcUrl (str "jdbc:" (:subprotocol spec) ":" (:subname spec)))
-               (.setUser (:user spec))
-               (.setPassword (:password spec))
-               (.setMaxIdleTimeExcessConnections excess)
-               (.setMaxIdleTime idle))]
-    {:datasource cpds}))
+(comment
+  (defmacro transaction
+    "Execute all queries within the body in a single transaction."
+    [& body]
+    `(jdbc/with-connection (get-connection @_default)
+       (jdbc/transaction
+        ~@body)))
 
-(defn delay-pool
-  "Return a delay for creating a connection pool for the given spec."
-  [spec]
-  (delay (connection-pool spec)))
+  (defn rollback
+    "Tell this current transaction to rollback."
+    []
+    (jdbc/set-rollback-only))
 
-(defn get-connection
-  "Get a connection from the potentially delayed connection object."
-  [db]
-  (let [db (if (map? db)
-             (:pool db)
-             db)]
-    (if-not db
-      (throw (Exception. "No valid DB connection selected."))
-      (if (delay? db)
-        @db
-        db))))
+  (defn is-rollback?
+    "Returns true if the current transaction will be rolled back"
+    []
+    (jdbc/is-rollback-only))
+
+
+  (defn- exec-sql [query]
+    (let [results? (:results query)
+          sql (:sql-str query)
+          params (:params query)]
+      (try
+        (condp = results?
+          :results (jdbc/with-query-results rs (apply vector sql params)
+        a            (vec rs))
+          :keys (ijdbc/do-prepared-return-keys* sql params)
+          (jdbc/do-prepared sql params))
+        (catch Exception e (handle-exception e sql params)))))
+
+  (defn do-query [query]
+    (let [conn (when-let[db (:db query)]
+                 (get-connection db))
+          cur (or conn (get-connection @_default))
+          prev-conn (jdbc/find-connection)
+          opts (or (:options query) @conf/options)]
+      (jdbc/with-naming-strategy (->strategy (:naming opts))
+        (if-not prev-conn
+          (jdbc/with-connection cur
+            (exec-sql query))
+          (exec-sql query)))))
+  )
 
 (defn create-db
-  "Create a db connection object manually instead of using defdb. This is often useful for
+    "Create a db connection object manually instead of using defdb. This is often useful for
   creating connections dynamically, and probably should be followed up with:
 
   (default-connection my-new-conn)"
-  [spec]
-  {:pool (delay-pool spec)
-   :options (conf/extract-options spec)})
+    [spec]
+    {:spec spec
+     :options (conf/extract-options spec)})
 
 (defmacro defdb
-  "Define a database specification. The last evaluated defdb will be used by default
+    "Define a database specification. The last evaluated defdb will be used by default
   for all queries where no database is specified by the entity."
-  [db-name spec]
-  `(let [spec# ~spec]
-     (defonce ~db-name (create-db spec#))
-     (default-connection ~db-name)))
+    [db-name spec]
+    `(let [spec# ~spec]
+       (defonce ~db-name (create-db spec#))
+       (default-connection ~db-name)))
 
-(defn postgres
-  "Create a database specification for a postgres database. Opts should include keys
-  for :db, :user, and :password. You can also optionally set host and port."
-  [{:keys [host port db] :as opts}]
-  (let [host (or host "localhost")
-        port (or port 5432)
-        db (or db "")]
-  (merge {:classname "org.postgresql.Driver" ; must be in classpath
-          :subprotocol "postgresql"
-          :subname (str "//" host ":" port "/" db)}
-         opts)))
+(defn load-type [typename]
+  (let [asms (seq (.GetAssemblies AppDomain/CurrentDomain))]
+    (loop [asm (first asms)
+           more (rest asms)]
+      (if asm
+        (if-let [type (.GetType asm typename)]
+          type
+          (recur (first more) (rest more)))
+          nil))))
 
-(defn oracle
-  "Create a database specification for an Oracle database. Opts should include keys
-  for :user and :password. You can also optionally set host and port."
-  [{:keys [host port] :as opts}]
-  (let [host (or (:host opts) "localhost")
-        port (or (:port opts) 1521)]
-    (merge {:classname "oracle.jdbc.driver.OracleDriver" ; must be in classpath
-            :subprotocol "oracle:thin"
-            :subname (str "@" host ":" port)}
-           opts)))
+(defn create-connection [db]
+  (let [{:keys [classname connection-string]} (:spec db)
+        cls (load-type classname)
+        conn (when cls (Activator/CreateInstance cls))]
+    (when conn
+      (.set_ConnectionString conn connection-string)
+      conn)))
 
 (defn mysql
-  "Create a database specification for a mysql database. Opts should include keys
+    "Create a database specification for a mysql database. Opts should include keys
   for :db, :user, and :password. You can also optionally set host and port.
   Delimiters are automatically set to \"`\"."
-  [{:keys [host port db] :as opts}]
-  (let [host (or (:host opts) "localhost")
-        port (or (:port opts) 3306)
-        db (or (:db opts) "")]
-  (merge {:classname "com.mysql.jdbc.Driver" ; must be in classpath
-          :subprotocol "mysql"
-          :subname (str "//" host ":" port "/" db)
-          :delimiters "`"}
-         opts)))
+    [opts]
+    (let []
+      (merge {:classname "MySql.Data.MySqlClient.MySqlConnection" ; MySql.Data.dll must be loaded 
+              :delimiters "`"
+              :get-last-insert-id mysql-get-last-insert-id
+              :connection-string (join ";" (map #(str (name (first %)) "=" (second %)) opts))}
+             opts)))
 
-(defn mssql
-  "Create a database specification for a mssql database. Opts should include keys
-  for :db, :user, and :password. You can also optionally set host and port."
-  [{:keys [user password db host port] :as opts}]
-  (let [host (or (:host opts) "localhost")
-        port (or (:port opts) 5432)
-        user (or user "dbuser")
-        password (or password "dbpassword")
-        db (or (:db opts) "")]
-  (merge {:classname "com.microsoft.sqlserver.jdbc.SQLServerDriver" ; must be in classpath
-          :subprotocol "sqlserver"
-          :subname (str "//" host ":" port ";database=" db ";user=" user ";password=" password)} 
-         opts)))
+(defn- mysql-get-last-insert-id [rows-affected]
+  (let [last-insert-id ((keyword "LAST_INSERT_ID()") (first (exec-reader-query "SELECT LAST_INSERT_ID()" [])))]
+    (for [i (range rows-affected)] {:id (when (= 0 i) last-insert-id)})))
 
-(defn sqlite3
-  "Create a database specification for a SQLite3 database. Opts should include a key
-  for :db which is the path to the database file."
-  [{:keys [db] :as opts}]
-  (let [db (or (:db opts) "sqlite.db")]
-    (merge {:classname "org.sqlite.JDBC" ; must be in classpath
-            :subprotocol "sqlite"
-            :subname db}
-           opts)))
+(defn set-params [command params]
+  (doall (map-indexed
+          (fn [idx param] (.AddWithValue (.get_Parameters command) (str "@p" idx) param)) params)))
 
-(defmacro transaction
-  "Execute all queries within the body in a single transaction."
-  [& body]
-  `(jdbc/with-connection (get-connection @_default)
-     (jdbc/transaction
-       ~@body)))
+(defn create-command [conn sql params]
+  (let [cmd (.CreateCommand conn)]
+    (.set_CommandText cmd sql)
+    (set-params cmd params)
+    cmd))
 
-(defn rollback
-  "Tell this current transaction to rollback."
-  []
-  (jdbc/set-rollback-only))
+(defn read-result [reader]
+  (let [n (.FieldCount reader)]
+    (apply hash-map (mapcat (fn [i] [(keyword (.GetName reader i)) (.GetValue reader i)]) (range n)))))
 
-(defn is-rollback?
-  "Returns true if the current transaction will be rolled back"
-  []
-  (jdbc/is-rollback-only))
+(defn read-results [reader]
+  (try (loop [res []]
+         (if (.Read reader)
+           (recur (conj res (read-result reader)))
+           res))
+       (finally (.Close reader))))
+
+(defn exec-scalar
+  ([conn sql params]
+      (let [cmd (create-command conn sql params)]
+        (.ExecuteScalar cmd)))
+  ([sql params] (exec-scalar *db* sql params)))
+
+
+(defn exec-non-query
+  ([conn sql params]
+      (let [cmd (create-command conn sql params)]
+        (.ExecuteNonQuery cmd)))
+  ([sql params] (exec-non-query *db* sql params)))
+
+(defn exec-reader-query
+  ([conn sql params]
+      (let [cmd (create-command conn sql params)]
+        (read-results (.ExecuteReader cmd))))
+  ([sql params] (exec-reader-query *db* sql params)))
+
+(defn- not-impl []
+  (println "Not implemented yet"))
 
 (defn handle-exception [e sql params]
-  (println "Failure to execute query with SQL:")
-  (println sql " :: " params)
-  (cond
-    (instance? java.sql.SQLException e) (jdbc/print-sql-exception e)
-    :else (.printStackTrace e))
-  (throw e))
+    (println "Failure to execute query with SQL:")
+    (println sql " :: " params)
+    (comment (cond
+              (instance? java.sql.SQLException e) (jdbc/print-sql-exception e)
+              :else (.printStackTrace e)))
+    (throw e))
 
 (defn- exec-sql [query]
-  (let [results? (:results query)
-        sql (:sql-str query)
-        params (:params query)]
-    (try
-      (condp = results?
-        :results (jdbc/with-query-results rs (apply vector sql params)
-                   (vec rs))
-        :keys (ijdbc/do-prepared-return-keys* sql params)
-        (jdbc/do-prepared sql params))
-      (catch Exception e (handle-exception e sql params)))))
+    (let [results? (:results query)
+          sql (:sql-str query)
+          params (:params query)]
+      (try
+        (condp = results?
+          :results (exec-reader-query sql params)
+          :keys (let [rows-affected (exec-non-query sql params)]
+                  (if *get-last-insert-id*
+                    (*get-last-insert-id* rows-affected)
+                    {:rows-affected rows-affected}))
+          (not-impl))
+        (catch Exception e (handle-exception e sql params)))))
+
+(defmacro with-connection [db & body]
+  `(binding [*db* (korma.db/create-connection ~db)
+             *get-last-insert-id* (:get-last-insert-id (:spec ~db))]
+     (try (.Open *db*)
+          (do ~@body)
+          (finally (.Close *db*)))))
 
 (defn do-query [query]
-  (let [conn (when-let[db (:db query)]
-               (get-connection db))
-        cur (or conn (get-connection @_default))
-        prev-conn (jdbc/find-connection)
+  (let [db (:db query)
+        db (or db @_default)
+        prev-conn *db*
         opts (or (:options query) @conf/options)]
-    (jdbc/with-naming-strategy (->strategy (:naming opts))
-      (if-not prev-conn
-        (jdbc/with-connection cur
-          (exec-sql query))
-        (exec-sql query)))))
+    (if-not prev-conn
+      (with-connection db
+        (exec-sql query))
+      (exec-sql query))))
