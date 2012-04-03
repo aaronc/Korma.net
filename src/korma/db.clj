@@ -14,9 +14,11 @@
   {:keyword keys
    :identifier fields})
 
-(def ^:dynamic *db* nil)
+(def ^:dynamic *db* {:connection nil :level 0})
 
 (def ^:dynamic *get-last-insert-id* nil)
+
+(def ^:dynamic *transaction* nil)
 
 (defn default-connection
     "Set the database connection that Korma should use by default when no 
@@ -117,8 +119,46 @@
              opts)))
 
 (defn- mysql-get-last-insert-id [rows-affected]
-  (let [last-insert-id ((keyword "LAST_INSERT_ID()") (first (exec-reader-query "SELECT LAST_INSERT_ID()" [])))]
+  (let [last-insert-id (exec-scalar "SELECT LAST_INSERT_ID()" [])]
     (for [i (range rows-affected)] {:id (when (= 0 i) last-insert-id)})))
+
+(defn with-connection* [db func]
+  (let [conn (korma.db/create-connection db)]
+    (binding [*db* (assoc *db* :connection conn :level 0 :rollback (atom false) :db db)
+             *get-last-insert-id* (:get-last-insert-id (:spec db))]
+     (try (.Open conn)
+          (func)
+          (finally (.Close conn))))))
+
+(defmacro with-connection [db & body]
+  `(korma.db/with-connection* ~db (fn [] ~@body)))
+
+(defn rollback "Tell this current transaction to rollback." []
+  (reset! (:rollback *db*) true))
+
+(defn is-rollback? "Returns true if the current transaction will be rolled back" []
+  (deref (:rollback *db*)))
+
+(defn transaction* [func]
+  (binding [*db* (update-in *db* [:level] inc)]
+    (if (= (:level *db*) 1)
+      (let [transaction (.BeginTransaction (get-connection))]
+        (try
+          (let [res (func)]
+            (if (is-rollback?)
+              (do (.Rollback transaction) nil)
+              (do (.Commit transaction) res)))
+          (catch Exception e
+            (.Rollback transaction)
+            (throw e))))
+      (func))))
+
+(defmacro transaction
+"Execute all queries within the body in a single transaction."
+[& body]
+`(with-connection @_default
+   (transaction* (fn [] ~@body))))
+
 
 (defn set-params [command params]
   (doall (map-indexed
@@ -141,24 +181,25 @@
            res))
        (finally (.Close reader))))
 
+(defn get-connection [] (:connection *db*))
+
 (defn exec-scalar
   ([conn sql params]
       (let [cmd (create-command conn sql params)]
         (.ExecuteScalar cmd)))
-  ([sql params] (exec-scalar *db* sql params)))
-
+  ([sql params] (exec-scalar (get-connection) sql params)))
 
 (defn exec-non-query
   ([conn sql params]
       (let [cmd (create-command conn sql params)]
         (.ExecuteNonQuery cmd)))
-  ([sql params] (exec-non-query *db* sql params)))
+  ([sql params] (exec-non-query (get-connection) sql params)))
 
 (defn exec-reader-query
   ([conn sql params]
       (let [cmd (create-command conn sql params)]
         (read-results (.ExecuteReader cmd))))
-  ([sql params] (exec-reader-query *db* sql params)))
+  ([sql params] (exec-reader-query (get-connection) sql params)))
 
 (defn- not-impl []
   (println "Not implemented yet"))
@@ -185,17 +226,11 @@
           (not-impl))
         (catch Exception e (handle-exception e sql params)))))
 
-(defmacro with-connection [db & body]
-  `(binding [*db* (korma.db/create-connection ~db)
-             *get-last-insert-id* (:get-last-insert-id (:spec ~db))]
-     (try (.Open *db*)
-          (do ~@body)
-          (finally (.Close *db*)))))
 
 (defn do-query [query]
   (let [db (:db query)
         db (or db @_default)
-        prev-conn *db*
+        prev-conn (get-connection)
         opts (or (:options query) @conf/options)]
     (if-not prev-conn
       (with-connection db
