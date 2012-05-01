@@ -1,11 +1,11 @@
 (ns korma.db
   "Functions for creating and managing database specifications."
-  
   (comment (:require [clojure.java.jdbc :as jdbc]
                      [clojure.java.jdbc.internal :as ijdbc]
                      [korma.config :as conf])
            (:import com.mchange.v2.c3p0.ComboPooledDataSource))
-  (:require [korma.config :as conf])
+  (:require [korma.config :as conf]
+            [clojure.string :as str])
   (:import [System.Data IDbCommand]))
 
 (defonce _default (atom nil))
@@ -19,6 +19,8 @@
 (def ^:dynamic *get-last-insert-id* nil)
 
 (def ^:dynamic *transaction* nil)
+
+(defn get-connection [] (:connection *db*))
 
 (defn default-connection
     "Set the database connection that Korma should use by default when no 
@@ -106,6 +108,12 @@
       (.set_ConnectionString conn connection-string)
       conn)))
 
+(declare exec-scalar)
+
+(defn- mysql-get-last-insert-id [rows-affected]
+  (let [last-insert-id (exec-scalar "SELECT LAST_INSERT_ID()" [])]
+    (for [i (range rows-affected)] {:id (when (= 0 i) last-insert-id)})))
+
 (defn mysql
     "Create a database specification for a mysql database. Opts should include keys
   for :db, :user, and :password. You can also optionally set host and port.
@@ -115,12 +123,8 @@
       (merge {:classname "MySql.Data.MySqlClient.MySqlConnection" ; MySql.Data.dll must be loaded 
               :delimiters "`"
               :get-last-insert-id mysql-get-last-insert-id
-              :connection-string (join ";" (map #(str (name (first %)) "=" (second %)) opts))}
+              :connection-string (str/join ";" (map #(str (name (first %)) "=" (second %)) opts))}
              opts)))
-
-(defn- mysql-get-last-insert-id [rows-affected]
-  (let [last-insert-id (exec-scalar "SELECT LAST_INSERT_ID()" [])]
-    (for [i (range rows-affected)] {:id (when (= 0 i) last-insert-id)})))
 
 (defn with-connection* [db func]
   (let [conn (korma.db/create-connection db)]
@@ -181,7 +185,6 @@
            res))
        (finally (.Close reader))))
 
-(defn get-connection [] (:connection *db*))
 
 (defn exec-scalar
   ([conn sql params]
