@@ -103,10 +103,14 @@
 (defn create-connection [db]
   (let [{:keys [classname connection-string]} (:spec db)
         cls (load-type classname)
-        conn (when cls (Activator/CreateInstance cls))]
-    (when conn
-      (.set_ConnectionString conn connection-string)
-      conn)))
+        conn (if cls
+               (Activator/CreateInstance cls)
+               (throw (Exception. (str "Unable to load database class " classname))))]
+    (if conn
+      (do
+        (.set_ConnectionString conn connection-string)
+        conn)
+      (throw (Exception. (str "Unable to connect to database of type " cls))))))
 
 (declare exec-scalar)
 
@@ -127,12 +131,13 @@
              opts)))
 
 (defn with-connection* [db func]
-  (let [conn (korma.db/create-connection db)]
+  (if-let [conn (korma.db/create-connection db)]
     (binding [*db* (assoc *db* :connection conn :level 0 :rollback (atom false) :db db)
              *get-last-insert-id* (:get-last-insert-id (:spec db))]
      (try (.Open conn)
           (func)
-          (finally (.Close conn))))))
+          (finally (.Close conn))))
+    (throw (Exception. (str "Unable to connect to database " db)))))
 
 (defmacro with-connection [db & body]
   `(korma.db/with-connection* ~db (fn [] ~@body)))
