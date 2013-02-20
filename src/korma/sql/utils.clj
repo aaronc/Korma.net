@@ -34,24 +34,31 @@
   (::generated m))
 
 (defn special-map? [m]
-  (some #(% m) [func? pred? sub-query? generated?]))
+  (boolean (some #(% m) [func? pred? sub-query? generated?])))
 
 ;;*****************************************************
 ;; str-utils
 ;;*****************************************************
 
-(defn space [vs]
-  (string/join " " vs))
-
-(defn comma [vs]
+(defn comma-separated [vs]
   (string/join ", " vs))
 
 (defn wrap [v]
   (str "(" v ")"))
 
 (defn wrap-all [vs]
-  (wrap (comma vs)))
+  (wrap (comma-separated vs)))
 
+(defn left-assoc [vs]
+  (loop [ret "" [v & vs] vs]
+    (cond
+      (nil? v) ret
+      (nil? vs) (str ret v)
+      :else (recur (wrap (str ret v)) vs))))
 
+;;*****************************************************
+;; collection-utils
+;;*****************************************************
 
-
+(defn vconcat [v1 v2]
+  (vec (concat v1 v2)))

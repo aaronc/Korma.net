@@ -4,24 +4,22 @@
                     :naming {:fields identity
                              :keys identity}}))
 
-(defn ->delimiters
-  [cs]
+(defn- ->delimiters [cs]
   (if cs
     (let [[begin end] cs
           end (or end begin)]
       [begin end])
     ["\"" "\""]))
 
-(defn ->naming
-  [strategy]
+(defn- ->naming [strategy]
   (merge {:keys identity
           :fields identity}
          strategy))
 
-(defn extract-options
-  [{:keys [naming delimiters]}]
+(defn extract-options [{:keys [naming delimiters subprotocol]}]
   {:naming (->naming naming)
-   :delimiters (->delimiters delimiters)})
+   :delimiters (->delimiters delimiters)
+   :subprotocol subprotocol})
 
 (defn set-delimiters
   "Set the global default for field delimiters in connections. Delimiters can either be
@@ -43,4 +41,4 @@
 
 (defn merge-defaults
   [opts]
-  (reset! options opts))
+  (swap! options merge opts))

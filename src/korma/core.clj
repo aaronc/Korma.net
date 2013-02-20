@@ -4,8 +4,9 @@
             [korma.sql.fns :as sfns]
             [korma.sql.utils :as utils]
             [clojure.set :as set]
+            [clojure.string :as string]
             [korma.db :as db])
-  (:use [korma.sql.engine :only [bind-query bind-params]]))
+  (:use [korma.sql.engine :only [bind-query]]))
 
 (def ^{:dynamic true} *exec-mode* false)
 (declare get-rel)
@@ -14,80 +15,98 @@
 ;; Query types
 ;;*****************************************************
 
-(defn- check-ent [ent]
-  (when-not (or (string? ent)
-                (map? ent))
-    (throw (Exception. (str "Invalid entity provided for the query: " ent)))))
-
 (defn empty-query [ent]
   (let [ent (if (keyword? ent)
               (name ent)
               ent)
         [ent table alias db opts] (if (string? ent)
                                     [{:table ent} ent nil nil nil]
-                                    [ent (:table ent) (:alias ent) 
-                                     (:db ent) (get-in ent [:db :options])])]
+                                    [ent (:table ent) (:alias ent) (:db ent) (get-in ent [:db :options])])]
     {:ent ent
      :table table
      :db db
      :options opts
      :alias alias}))
 
+(defmacro ^{:private true} make-query [ent m]
+  `(let [ent# ~ent]
+     (if (:type ent#)
+       ent#
+       (let [~'this-query (empty-query ent#)]
+         (merge ~'this-query ~m)))))
+
 (defn select* 
   "Create an empty select query. Ent can either be an entity defined by defentity,
   or a string of the table name"
   [ent]
-  (if (:type ent)
-    ent
-    (let [q (empty-query ent)]
-      (merge q {:type :select
-                :fields [::*]
-                :from [(:ent q)]
-                :modifiers []
-                :joins []
-                :where []
-                :order []
-                :aliases #{}
-                :group []
-                :results :results}))))
+  (make-query ent {:type :select
+                   :fields [::*]
+                   :from [(:ent this-query)]
+                   :modifiers []
+                   :joins []
+                   :where []
+                   :order []
+                   :aliases #{}
+                   :group []
+                   :results :results}))
 
 (defn update* 
   "Create an empty update query. Ent can either be an entity defined by defentity,
   or a string of the table name."
   [ent]
-  (if (:type ent)
-    ent
-    (let [q (empty-query ent)]
-      (merge q {:type :update
-                :fields {}
-                :where []
-                :results :keys}))))
-
+  (make-query ent {:type :update
+                   :fields {}
+                   :where []
+                   :results :keys}))
+  
 (defn delete* 
   "Create an empty delete query. Ent can either be an entity defined by defentity,
   or a string of the table name"
   [ent]
-  (if (:type ent)
-    ent
-    (let [q (empty-query ent)]
-      (merge q {:type :delete
-                :where []
-                :results :keys}))))
-
+  (make-query ent {:type :delete
+                   :where []
+                   :results :keys}))
+  
 (defn insert* 
   "Create an empty insert query. Ent can either be an entity defined by defentity,
   or a string of the table name"
   [ent]
-  (if (:type ent)
-    ent
-    (let [q (empty-query ent)]
-      (merge q {:type :insert
-                :values []
-                :results :keys}))))
+  (make-query ent {:type :insert
+                   :values []
+                   :results :keys}))
+
+(defn union*
+  "Create an empty union query."
+  []
+  {:type :union
+   :queries []
+   :order []
+   :results :results})
+
+(defn union-all*
+  "Create an empty union-all query."
+  []
+  {:type :union-all
+   :queries []
+   :order []
+   :results :results})
+
+(defn intersect*
+  "Create an empty intersect query."
+  []
+  {:type :intersect
+   :queries []
+   :order []
+   :results :results})
 
 ;;*****************************************************
 ;; Query macros
 ;;*****************************************************
+
+(defn- make-query-then-exec [query-fn-var body & args]
+  `(let [query# (-> (~query-fn-var ~@args)
+                    ~@body)]
+     (exec query#)))
 
 (defmacro select 
   "Creates a select query, applies any modifying functions in the body and then
@@ -97,9 +116,7 @@
         (fields :name :email)
         (where {:id 2}))"
   [ent & body]
-  `(let [query# (-> (select* ~ent)
-                 ~@body)]
-     (exec query#)))
+  (make-query-then-exec #'select* body ent))
 
 (defmacro update 
   "Creates an update query, applies any modifying functions in the body and then
@@ -109,9 +126,7 @@
         (set-fields {:name \"chris\"}) 
         (where {:id 4}))"
   [ent & body]
-  `(let [query# (-> (update* ~ent)
-                  ~@body)]
-     (exec query#)))
+  (make-query-then-exec #'update* body ent))
 
 (defmacro delete 
   "Creates a delete query, applies any modifying functions in the body and then
@@ -120,9 +135,7 @@
   ex: (delete user 
         (where {:id 7}))"
   [ent & body]
-  `(let [query# (-> (delete* ~ent)
-                  ~@body)]
-     (exec query#)))
+  (make-query-then-exec #'delete* body ent))
 
 (defmacro insert 
   "Creates an insert query, applies any modifying functions in the body and then
@@ -132,22 +145,56 @@
   ex: (insert user 
         (values [{:name \"chris\"} {:name \"john\"}]))"
   [ent & body]
-  `(let [query# (-> (insert* ~ent)
-                  ~@body)]
-     (exec query#)))
+  (make-query-then-exec #'insert* body ent))
+
+(defmacro union
+  "Creates a union query, applies any modifying functions in the body and then
+  executes it.
+  
+  ex: (union 
+        (queries (subselect user
+                   (where {:id 7}))
+                 (subselect user-backup
+                   (where {:id 7})))
+        (order :name))"
+  [& body]
+  (make-query-then-exec #'union* body))
+
+(defmacro union-all
+  "Creates a union-all query, applies any modifying functions in the body and then
+  executes it.
+  
+  ex: (union-all 
+        (queries (subselect user
+                   (where {:id 7}))
+                 (subselect user-backup
+                   (where {:id 7})))
+        (order :name))"
+  [& body]
+  (make-query-then-exec #'union-all* body))
+
+(defmacro intersect
+  "Creates an intersect query, applies any modifying functions in the body and then
+  executes it.
+  
+  ex: (intersect 
+        (queries (subselect user
+                   (where {:id 7}))
+                 (subselect user-backup
+                   (where {:id 8})))
+        (order :name))"
+  [& body]
+  (make-query-then-exec #'intersect* body))
 
 ;;*****************************************************
 ;; Query parts
 ;;*****************************************************
 
-(defn- add-aliases [query as]
-  (update-in query [:aliases] set/union as))
-
 (defn- update-fields [query fs]
   (let [[first-cur] (:fields query)]
     (if (= first-cur ::*)
       (assoc query :fields fs)
-      (update-in query [:fields] concat fs))))
+      (update-in query [:fields] utils/vconcat fs))))
 
 (defn fields
   "Set the fields to be selected in a query. Fields can either be a keyword
@@ -155,10 +202,10 @@
   
   (fields query :name [:firstname :first])"
   [query & vs] 
-  (let [aliases (set (map second (filter coll? vs)))]
+  (let [aliases (set (map second (filter vector? vs)))]
     (-> query
-        (add-aliases aliases)
-        (update-fields vs))))
+        (update-in [:aliases] set/union aliases)
+        (update-fields (vec vs)))))
 
 (defn set-fields
   "Set the fields and values for an update query."
@@ -169,6 +216,12 @@
   "Add tables to the from clause."
   [query table]
   (update-in query [:from] conj table))
+
+(defn- where-or-having-form [where*-or-having* query form]
+  `(let [q# ~query]
+     (~where*-or-having* q#
+                         (bind-query q#
+                                     (eng/pred-map ~(eng/parse-where `~form))))))
 
 (defn where*
   "Add a where clause to the query. Clause can be either a map or a string, and
@@ -181,21 +234,38 @@
   with keywords used to reference fields.
   e.g. (where query (or (= :hits 1) (> :hits 5)))
 
-  Available predicates: and, or, =, not=, <, >, <=, >=, in, like, not
+  Available predicates: and, or, =, not=, <, >, <=, >=, in, like, not, between
 
   Where can also take a map at any point and will create a clause that compares keys
   to values. The value can be a vector with one of the above predicate functions 
   describing how the key is related to the value: (where query {:name [like \"chris\"})"
   [query form]
-  `(let [q# ~query]
-     (where* q# 
-             (bind-query q#
-                         (eng/pred-map
-                           ~(eng/parse-where `~form))))))
+  (where-or-having-form #'where* query form))
+
+(defn having*
+  "Add a having clause to the query. Clause can be either a map or a string, and
+  will be AND'ed to the other clauses."
+  [query clause]
+  (update-in query [:having] conj clause))
+
+(defmacro having
+  "Add a having clause to the query, expressing the clause in clojure expressions
+  with keywords used to reference fields.
+  e.g. (having query (or (= :hits 1) (> :hits 5)))
+
+  Available predicates: and, or, =, not=, <, >, <=, >=, in, like, not, between
+
+  Having can also take a map at any point and will create a clause that compares keys
+  to values. The value can be a vector with one of the above predicate functions
+  describing how the key is related to the value: (having query {:name [like \"chris\"})
+
+  Having only works if you have an aggregation, using it without one will cause an error."
+  [query form]
+  (where-or-having-form #'having* query form))
 
 (defn order
-  "Add an ORDER BY clause to a select query. field should be a keyword of the field name, dir
-  is ASC by default.
+  "Add an ORDER BY clause to a select, union, union-all, or intersect query.
+  field should be a keyword of the field name, dir is ASC by default.
   
   (order query :created :asc)"
   [query field & [dir]]
@@ -207,29 +277,38 @@
   
   (values query [{:name \"john\"} {:name \"ed\"}])"
   [query values]
-  (update-in query [:values] concat (if (map? values)
-                                      [values]
-                                      values)))
+  (update-in query [:values] utils/vconcat (if (map? values)
+                                             [values]
+                                             values)))
 
 (defn join* [query type table clause]
   (update-in query [:joins] conj [type table clause]))
 
+(defn add-joins [query ent rel]
+  (if-let [join-table (:join-table rel)]
+    (-> query
+        (join* :left join-table (sfns/pred-= (:lpk rel) @(:lfk rel)))
+        (join* :left ent (sfns/pred-= @(:rfk rel) (:rpk rel))))
+    (join* query :left ent (sfns/pred-= (:pk rel) (:fk rel)))))
+
 (defmacro join 
-  "Add a join clause to a select query, specifying the table name to join and the predicate
-  to join on.
+  "Add a join clause to a select query, specifying the table name to
+  join and the predicate to join on. If the relationship uses a join
+  table then two clauses will be added. Otherwise, only one clause
+  will be added.
   
   (join query addresses)
   (join query addresses (= :addres.users_id :users.id))
   (join query :right addresses (= :address.users_id :users.id))"
   ([query ent]
-   `(let [q# ~query
-          e# ~ent
-          rel# (get-rel (:ent q#) e#)]
-      (join* q# :left e# (sfns/pred-= (:pk rel#) (:fk rel#)))))
+     `(let [q# ~query
+            e# ~ent
+            rel# (get-rel (:ent q#) e#)]
+        (add-joins q# e# rel#)))
   ([query table clause]
-   `(join* ~query :left ~table (eng/pred-map ~(eng/parse-where clause))))
+     `(join* ~query :left ~table (eng/pred-map ~(eng/parse-where clause))))
   ([query type table clause]
-   `(join* ~query ~type ~table (eng/pred-map ~(eng/parse-where clause)))))
+     `(join* ~query ~type ~table (eng/pred-map ~(eng/parse-where clause)))))
 
 (defn post-query
   "Add a function representing a query that should be executed for each result in a select.
@@ -250,7 +329,7 @@
 (defn group
   "Add a group-by clause to a select query"
   [query & fields]
-  (update-in query [:group] concat fields))
+  (update-in query [:group] utils/vconcat fields))
 
 (defmacro aggregate
   "Use a SQL aggregator function, aliasing the results, and optionally grouping by
@@ -263,10 +342,15 @@
   [query agg alias & [group-by]]
   `(let [q# ~query]
      (bind-query q#
-               (let [res# (fields q# [~(eng/parse-aggregate agg) ~alias])]
-                 (if ~group-by
-                   (group res# ~group-by)
-                   res#)))))
+       (let [res# (fields q# [(-> q# ~(eng/parse-aggregate agg)) ~alias])]
+         (if ~group-by
+           (group res# ~group-by)
+           res#)))))
+
+(defn queries
+  "Adds a group of queries to a union, union-all or intersect"
+  [query & queries]
+  (update-in query [:queries] utils/vconcat queries))
 
 ;;*****************************************************
 ;; Other sql
@@ -349,22 +433,24 @@
 
 (defn- apply-transforms
   [query results]
-  (if (not= (:type query) :select)
+  (if (= (:type query) :delete)
     results
     (if-let [trans (seq (-> query :ent :transforms))]
       (let [trans-fn (apply comp trans)]
-        (map trans-fn results))
+        (if (vector? results) (map trans-fn results) (trans-fn results)))
       results)))
 
 (defn- apply-prepares
   [query]
   (if-let [preps (seq (-> query :ent :prepares))]
     (let [preps (apply comp preps)]
-      (condp = (:type query)
-        :insert (let [values (:values query)]
-                  (assoc query :values (map preps values)))
-        :update (let [value (:set-fields query)]
-                  (assoc query :set-fields (preps value)))
+      (case (:type query)
+        :insert (->> (:values query)
+                     (map preps)
+                     (assoc query :values))
+        :update (->> (:set-fields query)
+                     preps
+                     (assoc query :set-fields))
         query))
     query))
 
@@ -418,40 +504,52 @@
    :fields []
    :rel {}})
 
-(defn create-relation
-  "Create a relation map describing how two entities are related."
-  [ent sub-ent type opts]
-  (let [[pk fk foreign-ent] (condp = type
-                  :has-one [(raw (eng/prefix ent (:pk ent)))
-                            (raw (eng/prefix sub-ent (keyword (str (:table ent) "_id"))))
-                            sub-ent]
-                  :belongs-to [(raw (eng/prefix sub-ent (:pk sub-ent)))
-                               (raw (eng/prefix ent (keyword (str (:table sub-ent) "_id"))))
-                               ent]
-                  :has-many [(raw (eng/prefix ent (:pk ent)))
-                             (raw (eng/prefix sub-ent (keyword (str (:table ent) "_id"))))
-                             sub-ent])
-        opts (when (:fk opts)
-               {:fk (raw (eng/prefix foreign-ent (:fk opts)))})]
+(defn- simple-table-name [ent]
+  (last (string/split (:table ent) #"\.")))
+
+(defn- default-fk-name [ent]
+  (cond
+   (map? ent) (keyword (str (simple-table-name ent) "_id"))
+   (var? ent) (recur @ent)
+   :else      (throw (Exception. (str "Can't determine default fk for " ent)))))
+
+(defn- many-to-many-keys [parent child {:keys [join-table lfk rfk]}]
+  {:lpk (raw (eng/prefix parent (:pk parent)))
+   :lfk (delay (raw (eng/prefix {:table (name join-table)} @lfk)))
+   :rfk (delay (raw (eng/prefix {:table (name join-table)} @rfk)))
+   :rpk (raw (eng/prefix child (:pk child)))
+   :join-table join-table})
+
+(defn- get-db-keys [parent child]
+  {:pk (raw (eng/prefix parent (:pk parent)))
+   :fk (raw (eng/prefix child (default-fk-name parent)))})
+
+(defn- db-keys-and-foreign-ent [type ent sub-ent opts]
+  (case type
+    :many-to-many        [(many-to-many-keys ent sub-ent opts) sub-ent]
+    (:has-one :has-many) [(get-db-keys ent sub-ent) sub-ent]
+    :belongs-to          [(get-db-keys sub-ent ent) ent]))
+
+(defn create-relation [ent sub-ent type opts]
+  (let [[db-keys foreign-ent] (db-keys-and-foreign-ent type ent sub-ent opts)
+        fk-override (when (:fk opts)
+                      {:fk (raw (eng/prefix foreign-ent (:fk opts)))})]
     (merge {:table (:table sub-ent)
             :alias (:alias sub-ent)
-            :rel-type type
-            :pk pk
-            :fk fk}
-           opts)))
+            :rel-type type}
+           db-keys
+           fk-override)))
 
-(defn rel
-  [ent sub-ent type opts]
+(defn rel [ent sub-ent type opts]
   (let [var-name (-> sub-ent meta :name)
         cur-ns *ns*]
     (assoc-in ent [:rel (name var-name)]
               (delay
-                (let [resolved (ns-resolve cur-ns var-name)
-                      sub-ent (when resolved
-                                (deref sub-ent))]
-                  (when-not (map? sub-ent)
-                    (throw (Exception. (format "Entity used in relationship does not exist: %s" (name var-name)))))
-                  (create-relation ent sub-ent type opts))))))
+               (let [resolved (ns-resolve cur-ns var-name)
+                     sub-ent (when resolved (deref sub-ent))]
+                 (when-not (map? sub-ent)
+                   (throw (Exception. (format "Entity used in relationship does not exist: %s" (name var-name)))))
+                 (create-relation ent sub-ent type opts))))))
 
 (defn get-rel [ent sub-ent]
   (let [sub-name (if (map? sub-ent)
@@ -462,7 +560,7 @@
 (defmacro has-one
   "Add a has-one relationship for the given entity. It is assumed that the foreign key
   is on the sub-entity with the format table_id: user.id = address.user_id
-  Opts can include a key for :fk to explicitly set the foreign key.
+  Can optionally pass a map with a :fk key to explicitly set the foreign key.
 
   (has-one users address {:fk :addressID})"
   [ent sub-ent & [opts]]
@@ -471,7 +569,7 @@
 (defmacro belongs-to
   "Add a belongs-to relationship for the given entity. It is assumed that the foreign key
   is on the current entity with the format sub-ent-table_id: email.user_id = user.id.
-  Opts can include a key for :fk to explicitly set the foreign key.
+  Can optionally pass a map with a :fk key to explicitly set the foreign key.
 
   (belongs-to users email {:fk :emailID})"
   [ent sub-ent & [opts]]
@@ -480,17 +578,31 @@
 (defmacro has-many
   "Add a has-many relation for the given entity. It is assumed that the foreign key
   is on the sub-entity with the format table_id: user.id = email.user_id
-  Opts can include a key for :fk to explicitly set the foreign key.
+  Can optionally pass a map with a :fk key to explicitly set the foreign key.
   
   (has-many users email {:fk :emailID})"
   [ent sub-ent & [opts]]
   `(rel ~ent (var ~sub-ent) :has-many ~opts))
 
+(defn many-to-many-fn [ent sub-ent-var join-table opts]
+  (let [opts (assoc opts
+               :join-table join-table
+               :lfk (delay (get opts :lfk (default-fk-name ent)))
+               :rfk (delay (get opts :rfk (default-fk-name sub-ent-var))))]
+    (rel ent sub-ent-var :many-to-many opts)))
+
+(defmacro many-to-many
+  "Add a many-to-many relation for the given entity.  It is assumed that a join
+   table is used to implement the relationship and that the foreign keys are in
+   the join table."
+  [ent sub-ent join-table & [opts]]
+  `(many-to-many-fn ~ent (var ~sub-ent) ~join-table ~opts))
+
 (defn entity-fields
   "Set the fields to be retrieved by default in select queries for the
   entity."
   [ent & fields]
-  (update-in ent [:fields] concat (map #(eng/prefix ent %) fields)))
+  (update-in ent [:fields] utils/vconcat (map #(eng/prefix ent %) fields)))
 
 (defn table
   "Set the name of the table and an optional alias to be used for the entity. 
@@ -540,33 +652,27 @@
 ;;*****************************************************
 
 (defn- force-prefix [ent fields]
-  (for [field fields]
-    (if (vector? field)
-      [(utils/generated (eng/prefix ent (first field))) (second field)]
-      (eng/prefix ent field))))
-
-(defn merge-part [query neue k]
-  (update-in query [k] #(if-let [vs (k neue)]
-                          (vec (concat % vs))
-                          %)))
+  (vec (for [field fields]
+         (if (vector? field)
+           [(utils/generated (eng/prefix ent (first field))) (second field)]
+           (eng/prefix ent field)))))
 
 (defn- merge-query [query neue]
-  (let [merged (reduce #(merge-part % neue %2)
-                       query
-                       [:fields :group :order :where :params :joins :post-queries])]
-    (-> merged
-        (add-aliases (:aliases neue)))))
+  (reduce (fn [query* k]
+            (update-in query* [k] #(into % (get neue k))))
+          query
+          [:aliases :fields :group :joins :order :params :post-queries :where]))
 
-(defn- sub-query [query sub-ent func]
+(defn- sub-query [query sub-ent body-fn]
   (let [neue (select* sub-ent)
-        neue (bind-query neue (func neue))
+        neue (bind-query neue (body-fn neue))
         neue (-> neue
                  (update-in [:fields] #(force-prefix sub-ent %))
                  (update-in [:order] #(force-prefix sub-ent %))
                  (update-in [:group] #(force-prefix sub-ent %)))]
     (merge-query query neue)))
 
-(defn- with-later [rel query ent func]
+(defn- with-later [rel query ent body-fn]
   (let [fk (:fk rel)
         pk (get-in query [:ent :pk])
         table (keyword (eng/table-alias ent))]
@@ -574,22 +680,33 @@
                 (partial map 
                          #(assoc % table
                                  (select ent
-                                         (func)
+                                         (body-fn)
                                          (where {fk (get % pk)})))))))
 
-(defn- with-now [rel query ent func]
+(defn- with-now [rel query ent body-fn]
   (let [table (if (:alias rel)
                 [(:table ent) (:alias ent)]
                 (:table ent))
         query (join query table (= (:pk rel) (:fk rel)))]
-    (sub-query query ent func)))
+    (sub-query query ent body-fn)))
 
-(defn with* [query sub-ent func]
+(defn- with-many-to-many [{:keys [lfk rfk rpk join-table]} query ent body-fn]
+  (let [pk (get-in query [:ent :pk])
+        table (keyword (eng/table-alias ent))]
+    (post-query query (partial map
+                               #(assoc % table
+                                       (select ent
+                                               (join :inner join-table (= @rfk rpk))
+                                               (body-fn)
+                                               (where {@lfk (get % pk)})))))))
+
+(defn with* [query sub-ent body-fn]
   (let [rel (get-rel (:ent query) sub-ent)]
-    (cond
-      (not rel) (throw (Exception. (str "No relationship defined for table: " (:table sub-ent))))
-      (#{:has-one :belongs-to} (:rel-type rel)) (with-now rel query sub-ent func)
-      :else (with-later rel query sub-ent func))))
+    (case (:rel-type rel)
+      (:has-one :belongs-to) (with-now rel query sub-ent body-fn)
+      :has-many              (with-later rel query sub-ent body-fn)
+      :many-to-many          (with-many-to-many rel query sub-ent body-fn)
+      (throw (Exception. (str "No relationship defined for table: " (:table sub-ent)))))))
 
 (defmacro with
   "Add a related entity to the given select query. If the entity has a relationship
