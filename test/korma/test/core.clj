@@ -5,8 +5,8 @@
         korma.core
         korma.db))
 
-(defdb test-db-opts (postgres {:db "korma" :user "korma" :password "kormapass" :delimiters "" :naming {:fields string/upper-case}}))
-(defdb test-db (postgres {:db "korma" :user "korma" :password "kormapass"}))
+(defdb test-db-opts (sqlite3 {"Data Source" ":memory:" :unindexed-params true :delimiters "" :naming {:fields string/upper-case}}))
+(defdb test-db (sqlite3 {"Data Source" ":memory:" :unindexed-params true }))
 
 (defentity delims
   (database test-db-opts))

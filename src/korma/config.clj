@@ -16,10 +16,11 @@
           :fields identity}
          strategy))
 
-(defn extract-options [{:keys [naming delimiters subprotocol]}]
+(defn extract-options [{:keys [naming delimiters subprotocol unindexed-params]}]
   {:naming (->naming naming)
    :delimiters (->delimiters delimiters)
-   :subprotocol subprotocol})
+   :subprotocol subprotocol
+   :unindexed-params unindexed-params})
 
 (defn set-delimiters
   "Set the global default for field delimiters in connections. Delimiters can either be

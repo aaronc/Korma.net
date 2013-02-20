@@ -391,7 +391,8 @@
 
 (defmacro ^{:private true} bind-params [& body]
   `(binding [*bound-params* (atom [])
-             *bound-param-index* (atom -1)]
+             *bound-param-index* (when-not (:unindexed-params *bound-options*)
+                                   (atom -1))]
      (let [query# (do ~@body)]
        (update-in query# [:params] utils/vconcat @*bound-params*))))
 

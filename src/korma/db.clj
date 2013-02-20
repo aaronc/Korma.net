@@ -70,8 +70,7 @@
         (if-not prev-conn
           (jdbc/with-connection cur
             (exec-sql query))
-          (exec-sql query)))))
-  )
+          (exec-sql query))))))
 
 (defn create-db
     "Create a db connection object manually instead of using defdb. This is often useful for
@@ -101,18 +100,24 @@
           nil))))
 
 (defn create-connection [db]
-  (let [{:keys [classname connection-string]} (:spec db)
-        cls (load-type classname)
-        conn (if cls
-               (Activator/CreateInstance cls)
-               (throw (Exception. (str "Unable to load database class " classname))))]
-    (if conn
-      (do
-        (.set_ConnectionString conn connection-string)
-        conn)
-      (throw (Exception. (str "Unable to connect to database of type " cls))))))
+  (let [{:keys [assembly-name classname connection-string]} (:spec db)]
+    (when assembly-name
+      (try (assembly-load assembly-name)
+           (catch Object ex)))
+    (let [cls (load-type classname)
+          conn (if cls
+                 (Activator/CreateInstance cls)
+                 (throw (Exception. (str "Unable to load database class " classname))))]
+      (if conn
+        (do
+          (.set_ConnectionString conn connection-string)
+          conn)
+        (throw (Exception. (str "Unable to connect to database of type " cls)))))))
 
 (declare exec-scalar)
+
+(defn- make-default-connection-string [opts]
+  (str/join ";" (map #(str (name (first %)) "=" (second %)) opts)))
 
 (defn- mysql-get-last-insert-id [rows-affected]
   (let [last-insert-id (exec-scalar "SELECT LAST_INSERT_ID()" [])]
@@ -120,15 +125,35 @@
 
 (defn mysql
     "Create a database specification for a mysql database. Opts should include keys
-  for :db, :user, and :password. You can also optionally set host and port.
+  for :Database, :Uid, and :Pwd. You can also optionally set :Host and :Port.
   Delimiters are automatically set to \"`\"."
     [opts]
-    (let []
-      (merge {:classname "MySql.Data.MySqlClient.MySqlConnection" ; MySql.Data.dll must be loaded 
-              :delimiters "`"
-              :get-last-insert-id mysql-get-last-insert-id
-              :connection-string (str/join ";" (map #(str (name (first %)) "=" (second %)) opts))}
-             opts)))
+    (merge {:assembly-name "Mysql.Data"
+            :classname "MySql.Data.MySqlClient.MySqlConnection" 
+            :delimiters "`"
+            :get-last-insert-id mysql-get-last-insert-id
+            :connection-string (make-default-connection-string opts)}
+           opts))
+
+(defn postgres
+  "Create a database specification for a postgres database. Opts should include keys
+  for \"Database\", \"User Id\", and \"Password\". You can also optionally set \"Server\" and \"Port\"."
+  [opts]
+  (merge {:assembly-name "Npgsql"
+          :classname "System.Data.SQLite.SQLiteConnection" 
+          ;;:get-last-insert-id mysql-get-last-insert-id
+          :connection-string (make-default-connection-string opts)}
+           opts))
+
+(defn sqlite3
+  "Create a database specification for a SQLite3 database. Opts should include a key
+  for \"Data Source\" which is the path to the database file."
+  [opts]
+  (merge {:assembly-name "System.Data.SQLite"
+          :classname "System.Data.SQLite.SQLiteConnection" 
+          ;;:get-last-insert-id mysql-get-last-insert-id
+          :connection-string (make-default-connection-string opts)}
+           opts))
 
 (defn with-connection* [db func]
   (if-let [conn (korma.db/create-connection db)]
