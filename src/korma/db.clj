@@ -140,7 +140,7 @@
   for \"Database\", \"User Id\", and \"Password\". You can also optionally set \"Server\" and \"Port\"."
   [opts]
   (merge {:assembly-name "Npgsql"
-          :classname "System.Data.SQLite.SQLiteConnection" 
+          :classname "Npgsql.NpgsqlConnection" 
           ;;:get-last-insert-id mysql-get-last-insert-id
           :connection-string (make-default-connection-string opts)}
            opts))
