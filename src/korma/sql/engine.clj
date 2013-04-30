@@ -338,7 +338,7 @@
   (if (empty? (get query where-or-having-kw))
     query
     (let [clauses (map #(if (map? %) (map-val %) %)
-      (get query where-or-having-kw))
+                       (get query where-or-having-kw))
           clauses-str (string/join " AND " clauses)
           neue-sql (str where-or-having-str clauses-str)]
       (if (= "()" clauses-str)
