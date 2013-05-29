@@ -318,9 +318,10 @@
 ;;*****************************************************
 
 (defn sql-set [query]
-  (bind-query {}
-              (let [fields (for [[k v] (:set-fields query)]
-                             [(utils/generated (field-identifier k)) (utils/generated (str-value v))])
+  (bind-query query
+              (let [fields (doall
+                            (for [[k v] (:set-fields query)]
+                              [(utils/generated (field-identifier k)) (utils/generated (str-value v))]))
                     clauses (map set= fields)
                     clauses-str (utils/comma-separated clauses)
                     neue-sql (str " SET " clauses-str)]

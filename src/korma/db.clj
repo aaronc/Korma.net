@@ -16,8 +16,6 @@
 
 (def ^:dynamic *db* {:connection nil :level 0})
 
-(def ^:dynamic *get-last-insert-id* nil)
-
 (def ^:dynamic *transaction* nil)
 
 (defn get-connection [] (:connection *db*))
@@ -72,6 +70,41 @@
             (exec-sql query))
           (exec-sql query))))))
 
+(declare exec-scalar)
+
+(defn default-convert-value [v#]
+  (cond
+   (instance? System.DBNull v#)
+   nil
+
+   :else
+   v#))
+
+(defn- mysql-get-last-insert-id [rows-affected]
+  (let [last-insert-id (exec-scalar "SELECT LAST_INSERT_ID()" [])]
+    (for [i (range rows-affected)] {:id (when (= 0 i) last-insert-id)})))
+
+(defn- mysql-subprotocol []
+  {:get-last-insert-id
+   mysql-get-last-insert-id
+   :convert-value
+   (eval `(fn mysql-convert-value [v#]
+            (cond
+             (instance? MySql.Data.Types.MySqlDateTime v#)
+             (when (.IsValidDateTime v#)
+               (.GetDateTime v#))
+
+             (instance? System.DBNull v#)
+             nil
+
+             :else
+             v#)))})
+
+(defn- extract-subprotocol [{:keys [subprotocol]}]
+  (case subprotocol
+    "mysql" (mysql-subprotocol)
+    nil))
+
 (defn create-db
     "Create a db connection object manually instead of using defdb. This is often useful for
   creating connections dynamically, and probably should be followed up with:
@@ -79,6 +112,7 @@
   (default-connection my-new-conn)"
     [spec]
     {:spec spec
+     :subprotocol (extract-subprotocol spec)
      :options (conf/extract-options spec)})
 
 (defmacro defdb
@@ -114,14 +148,9 @@
           conn)
         (throw (Exception. (str "Unable to connect to database of type " cls)))))))
 
-(declare exec-scalar)
-
 (defn- make-default-connection-string [opts]
-  (str/join ";" (map #(str (name (first %)) "=" (second %)) opts)))
-
-(defn- mysql-get-last-insert-id [rows-affected]
-  (let [last-insert-id (exec-scalar "SELECT LAST_INSERT_ID()" [])]
-    (for [i (range rows-affected)] {:id (when (= 0 i) last-insert-id)})))
+  (let [opts (dissoc opts :naming :subprotocol :delimiters)]
+    (str/join ";" (map #(str (name (first %)) "=" (second %)) opts))))
 
 (defn mysql
     "Create a database specification for a mysql database. Opts should include keys
@@ -130,8 +159,8 @@
     [opts]
     (merge {:assembly-name "Mysql.Data"
             :classname "MySql.Data.MySqlClient.MySqlConnection" 
+            :subprotocol "mysql"
             :delimiters "`"
-            :get-last-insert-id mysql-get-last-insert-id
             :connection-string (make-default-connection-string opts)}
            opts))
 
@@ -141,7 +170,7 @@
   [opts]
   (merge {:assembly-name "Npgsql"
           :classname "Npgsql.NpgsqlConnection" 
-          ;;:get-last-insert-id mysql-get-last-insert-id
+          :subprotocol "sqlite3"
           :connection-string (make-default-connection-string opts)}
            opts))
 
@@ -151,14 +180,13 @@
   [opts]
   (merge {:assembly-name "System.Data.SQLite"
           :classname "System.Data.SQLite.SQLiteConnection" 
-          ;;:get-last-insert-id mysql-get-last-insert-id
+          :subprotocol "sqlite3"
           :connection-string (make-default-connection-string opts)}
            opts))
 
 (defn with-connection* [db func]
   (if-let [conn (korma.db/create-connection db)]
-    (binding [*db* (assoc *db* :connection conn :level 0 :rollback (atom false) :db db)
-             *get-last-insert-id* (:get-last-insert-id (:spec db))]
+    (binding [*db* (assoc *db* :connection conn :level 0 :rollback (atom false) :db db)]
      (try (.Open conn)
           (func)
           (finally (.Close conn))))
@@ -188,10 +216,10 @@
       (func))))
 
 (defmacro transaction
-"Execute all queries within the body in a single transaction."
-[& body]
-`(with-connection @_default
-   (transaction* (fn [] ~@body))))
+  "Execute all queries within the body in a single transaction."
+  [& body]
+  `(with-connection @_default
+     (transaction* (fn [] ~@body))))
 
 
 (defn set-params [command params]
@@ -204,17 +232,16 @@
     (set-params cmd params)
     cmd))
 
-(defn read-result [reader]
+(defn- read-result [reader convert-value]
   (let [n (.FieldCount reader)]
-    (apply hash-map (mapcat (fn [i] [(keyword (.GetName reader i)) (.GetValue reader i)]) (range n)))))
+    (apply hash-map (mapcat (fn [i] [(keyword (.GetName reader i)) (convert-value (.GetValue reader i))]) (range n)))))
 
-(defn read-results [reader]
+(defn- read-results [reader {:keys [convert-value] :or {convert-value default-convert-value}}]
   (try (loop [res []]
          (if (.Read reader)
-           (recur (conj res (read-result reader)))
+           (recur (conj res (read-result reader convert-value)))
            res))
        (finally (.Close reader))))
-
 
 (defn exec-scalar
   ([conn sql params]
@@ -229,10 +256,10 @@
   ([sql params] (exec-non-query (get-connection) sql params)))
 
 (defn exec-reader-query
-  ([conn sql params]
+  ([conn sql params subprotocol]
       (let [cmd (create-command conn sql params)]
-        (read-results (.ExecuteReader cmd))))
-  ([sql params] (exec-reader-query (get-connection) sql params)))
+        (read-results (.ExecuteReader cmd) subprotocol)))
+  ([sql params subprotocol] (exec-reader-query (get-connection) sql params subprotocol)))
 
 (defn- not-impl []
   (println "Not implemented yet"))
@@ -245,16 +272,21 @@
               :else (.printStackTrace e)))
     (throw e))
 
+(defn- get-last-insert-id [rows-affected]
+  (when-let [get-last-insert-id-fn (get-in *db* [:db :subprotocol :get-last-insert-id])]
+    (get-last-insert-id-fn rows-affected)))
+
 (defn- exec-sql [query]
     (let [results? (:results query)
           sql (:sql-str query)
-          params (:params query)]
+          params (:params query)
+          subprotocol (get-in query [:db :subprotocol])]
       (try
         (condp = results?
-          :results (exec-reader-query sql params)
+          :results (exec-reader-query sql params subprotocol)
           :keys (let [rows-affected (exec-non-query sql params)]
-                  (if *get-last-insert-id*
-                    (*get-last-insert-id* rows-affected)
+                  (if-let [last-insert-id (get-last-insert-id rows-affected)]
+                    last-insert-id
                     {:rows-affected rows-affected}))
           (not-impl))
         (catch Exception e (handle-exception e sql params)))))
