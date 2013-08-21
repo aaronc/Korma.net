@@ -48,6 +48,9 @@
     <EmbeddedResource Include="sql\fns.clj" />
     <EmbeddedResource Include="sql\utils.clj" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="mysql.clj" />
+  </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <ProjectExtensions>
     <VisualStudio>
